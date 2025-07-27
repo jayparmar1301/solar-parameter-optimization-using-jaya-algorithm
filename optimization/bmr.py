@@ -1,25 +1,30 @@
 """
-JAYA Optimizer Implementation
-Simple and parameter-free metaheuristic optimization algorithm
+BMR (Best-Mean-Random) Optimizer Implementation
+Population-based metaheuristic optimization algorithm
 
-Reference: Rao, R. (2016). Jaya: A simple and new optimization algorithm 
-for solving constrained and unconstrained optimization problems. 
-International Journal of Industrial Engineering Computations, 7(1), 19-34.
+The BMR algorithm uses the best solution, mean of population, and random solution
+to guide the search process with both exploitation and exploration capabilities.
 """
 
 import numpy as np
 from typing import Dict, Tuple
 from .base_optimizer import BaseOptimizer
 
-class JAYAOptimizer(BaseOptimizer):
+class BMROptimizer(BaseOptimizer):
     """
-    JAYA Optimization Algorithm
+    BMR (Best-Mean-Random) Optimization Algorithm
     
-    JAYA means "victory" in Sanskrit. It's a simple, parameter-free algorithm
-    that moves towards the best solution and away from the worst solution.
+    The algorithm moves towards the best solution using mean population values
+    and random solutions for exploration. It includes a random reinitialization
+    mechanism for enhanced exploration.
     
-    Update equation:
-    X_new = X_old + r1*(X_best - |X_old|) - r2*(X_worst - |X_old|)
+    Update equations:
+    If r4 > 0.5:
+        V'j,k,i = Vj,k,i + r1*(Vj,best,i - T*Vj,mean,i) + r2*(Vj,best,i - Vj,random,i)
+    Else:
+        V'j,k,i = Uj - (Uj - Lj)*r3
+    
+    Where T is randomly chosen from {1, 2}
     """
     
     def __init__(self, 
@@ -30,7 +35,7 @@ class JAYAOptimizer(BaseOptimizer):
                  tolerance: float = 1e-10,
                  verbose: bool = False):
         """
-        Initialize JAYA optimizer
+        Initialize BMR optimizer
         
         Args:
             objective_func: Function to minimize
@@ -46,7 +51,7 @@ class JAYAOptimizer(BaseOptimizer):
         
     def optimize(self) -> Tuple[Dict[str, float], float]:
         """
-        Run JAYA optimization algorithm
+        Run BMR optimization algorithm
         
         Returns:
             Tuple of (best_parameters, best_fitness)
@@ -66,26 +71,47 @@ class JAYAOptimizer(BaseOptimizer):
         for iteration in range(self.max_iterations):
             self.iteration_count = iteration + 1
             
-            # Find best and worst solutions in current population
+            # Find best solution in current population
             best_idx = np.argmin(fitness)
-            worst_idx = np.argmax(fitness)
-            
             best_solution = population[best_idx]
-            worst_solution = population[worst_idx]
             
-            # Create new population using JAYA update equation
+            # Calculate mean of population for each dimension
+            mean_solution = np.mean(population, axis=0)
+            
+            # Create new population using BMR update equations
             new_population = np.zeros_like(population)
             
             for i in range(self.population_size):
-                # Generate random numbers r1 and r2 for each dimension
+                # Generate random numbers r1, r2, r3, r4 for each dimension
                 r1 = np.random.random(self.dim)
                 r2 = np.random.random(self.dim)
+                r3 = np.random.random(self.dim)
+                r4 = np.random.random(self.dim)
                 
-                # JAYA update equation
-                # Move towards best solution and away from worst solution
-                new_individual = (population[i] + 
-                                r1 * (best_solution - np.abs(population[i])) -
-                                r2 * (worst_solution - np.abs(population[i])))
+                # T factor randomly takes value 1 or 2 for each dimension
+                T = np.random.choice([1, 2], size=self.dim)
+                
+                # Select random solution from population (excluding current individual)
+                available_indices = list(range(self.population_size))
+                available_indices.remove(i)
+                random_idx = np.random.choice(available_indices)
+                random_solution = population[random_idx]
+                
+                # Initialize new individual
+                new_individual = np.zeros(self.dim)
+                
+                # Apply BMR update equations dimension by dimension
+                for j in range(self.dim):
+                    if r4[j] > 0.2:
+                        # Equation (1): Exploitation using best, mean, and random
+                        new_individual[j] = (population[i][j] + 
+                                           r1[j] * (best_solution[j] - T[j] * mean_solution[j]) +
+                                           r2[j] * (best_solution[j] - random_solution[j]))
+                    else:
+                        # Equation (2): Exploration through random reinitialization
+                        Uj = self.upper_bounds[j]
+                        Lj = self.lower_bounds[j]
+                        new_individual[j] = Uj - (Uj - Lj) * r3[j]
                 
                 # Apply boundary constraints
                 new_individual = self.bound_constraint(new_individual, population[i])
@@ -94,7 +120,7 @@ class JAYAOptimizer(BaseOptimizer):
             # Evaluate new population
             new_fitness = self.evaluate_population(new_population)
             
-            # Selection: Keep better solutions
+            # Selection: Keep better solutions (greedy selection)
             for i in range(self.population_size):
                 if new_fitness[i] < fitness[i]:
                     population[i] = new_population[i]
@@ -130,14 +156,18 @@ class JAYAOptimizer(BaseOptimizer):
             Dictionary with algorithm details
         """
         return {
-            'name': 'JAYA',
+            'name': 'BMR',
+            'full_name': 'Best-Mean-Random',
             'type': 'Population-based metaheuristic',
             'parameters': 'Parameter-free',
-            'reference': 'Rao, R. (2016). Jaya: A simple and new optimization algorithm',
             'characteristics': [
-                'Simple implementation',
-                'No algorithm-specific parameters',
-                'Moves towards best and away from worst',
-                'Suitable for constrained and unconstrained problems'
+                'Uses best solution, population mean, and random solution',
+                'Balanced exploitation and exploration',
+                'Random reinitialization for enhanced exploration',
+                'T factor adds randomness to mean influence'
+            ],
+            'update_mechanism': [
+                'Exploitation: V\' = V + r1*(V_best - T*V_mean) + r2*(V_best - V_random)',
+                'Exploration: V\' = U - (U - L)*r3'
             ]
         }

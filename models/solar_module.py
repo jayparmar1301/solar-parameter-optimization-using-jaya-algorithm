@@ -1,152 +1,214 @@
 """
-Solar module model and objective function
+Solar Module Model - Double Diode Model
+Implementation of double-diode equivalent circuit model for PV modules
 """
+
 import numpy as np
 from scipy.optimize import fsolve
-from typing import Dict, Tuple, List
-from config.solar_modules import Q, K, T0, SOLAR_MODULES
+from typing import Dict, List, Tuple, Optional
+import sys
+import os
 
+# Add config to path
+sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
+from config.solar_modules import SOLAR_MODULES, PHYSICAL_CONSTANTS
 
 class SolarModuleModel:
-    """Solar photovoltaic module model"""
+    """
+    Double-diode model for photovoltaic modules
     
-    def __init__(self, module_type: str = 'ST40', temperature: float = 25):
+    The double-diode model represents the PV cell with:
+    - Photocurrent source (Iph)
+    - Two diodes (with saturation currents Is1, Is2 and ideality factors a1, a2)
+    - Series resistance (Rs)
+    - Parallel/shunt resistance (Rp)
+    
+    Circuit equation: I = Iph - Is1*(exp(q*(V+I*Rs)/(a1*k*T*Nc)) - 1) 
+                         - Is2*(exp(q*(V+I*Rs)/(a2*k*T*Nc)) - 1) - (V+I*Rs)/Rp
+    """
+    
+    def __init__(self, module_name: str, temperature: float = 25.0):
         """
         Initialize solar module model
         
         Args:
-            module_type: Type of solar module ('KC200GT', 'SQ85', 'ST40')
+            module_name: Name of the module (from SOLAR_MODULES)
             temperature: Operating temperature in Celsius
         """
-        if module_type not in SOLAR_MODULES:
-            raise ValueError(f"Unknown module type: {module_type}")
-        
-        self.module_specs = SOLAR_MODULES[module_type]
+        if module_name not in SOLAR_MODULES:
+            raise ValueError(f"Unknown module: {module_name}. Available: {list(SOLAR_MODULES.keys())}")
+            
+        self.module_name = module_name
+        self.module_specs = SOLAR_MODULES[module_name]
         self.temperature = temperature
-        self.T = temperature + T0  # Convert to Kelvin
         
-        # Extract module parameters
-        self.Voc = self.module_specs['Voc']
-        self.Isc = self.module_specs['Isc']
-        self.Vm = self.module_specs['Vm']
-        self.Im = self.module_specs['Im']
-        self.Nc = self.module_specs['Nc']
+        # Extract module specifications
+        self.Voc = self.module_specs['Voc']  # Open circuit voltage
+        self.Isc = self.module_specs['Isc']  # Short circuit current
+        self.Vm = self.module_specs['Vm']    # Voltage at max power
+        self.Im = self.module_specs['Im']    # Current at max power
+        self.Nc = self.module_specs['Nc']    # Number of cells
         
-    def objective_function(self, x: np.ndarray) -> float:
+        # Physical constants
+        self.q = PHYSICAL_CONSTANTS['q']     # Electron charge
+        self.k = PHYSICAL_CONSTANTS['k']     # Boltzmann constant
+        self.T0 = PHYSICAL_CONSTANTS['T0']   # Absolute temperature at 0°C
+        self.T = self.T0 + temperature       # Absolute temperature
+        
+    def calculate_derived_parameters(self, params: np.ndarray) -> Tuple[float, float]:
         """
-        Calculate the objective function (sum of squared errors)
+        Calculate Is2 and Iph from the five main parameters
         
         Args:
-            x: Array of parameters [a, Rs, Rp]
+            params: [Is1, a1, a2, Rs, Rp]
             
         Returns:
-            error: Sum of squared errors
+            Tuple of (Is2, Iph)
         """
-        a, Rs, Rp = x
+        Is1, a1, a2, Rs, Rp = params
         
-        # Calculate saturation current Is
-        exp_voc = np.exp(Q * self.Voc / (a * K * self.Nc * self.T))
-        exp_rs_isc = np.exp(Q * Rs * self.Isc / (a * K * self.Nc * self.T))
+        # Calculate Is2 using boundary conditions at Voc and Isc
+        numerator = (self.Isc + Rs * self.Isc / Rp - self.Voc / Rp - 
+                    Is1 * (np.exp(self.q * self.Voc / (a1 * self.k * self.Nc * self.T)) - 
+                           np.exp(self.q * Rs * self.Isc / (a1 * self.k * self.Nc * self.T))))
         
-        Is = (self.Isc + Rs * self.Isc / Rp - self.Voc / Rp) / (exp_voc - exp_rs_isc)
+        denominator = (np.exp(self.q * self.Voc / (a2 * self.k * self.Nc * self.T)) - 
+                      np.exp(self.q * Rs * self.Isc / (a2 * self.k * self.Nc * self.T)))
+        
+        Is2 = abs(numerator / denominator)
         
         # Calculate photocurrent Iph
-        Iph = Is * (exp_voc - 1) + self.Voc / Rp
+        Iph = (Is1 * (np.exp(self.q * self.Voc / (a1 * self.k * self.Nc * self.T)) - 1) + 
+               Is2 * (np.exp(self.q * self.Voc / (a2 * self.k * self.Nc * self.T)) - 1) + 
+               self.Voc / Rp)
         
-        # Calculate errors at three key points
-        # Error 1: At open circuit (V = Voc, I = 0)
-        eps1 = Is * (exp_voc - 1) + self.Voc / Rp - Iph
-        
-        # Error 2: At short circuit (V = 0, I = Isc)
-        eps2 = self.Isc + Is * (exp_rs_isc - 1) + Rs * self.Isc / Rp - Iph
-        
-        # Error 3: At maximum power point (V = Vm, I = Im)
-        exp_vm_im = np.exp(Q * (self.Vm + Rs * self.Im) / (a * K * self.Nc * self.T))
-        eps3 = Iph - Is * (exp_vm_im - 1) - (self.Vm + Rs * self.Im) / Rp - self.Im
-        
-        # Total error (sum of squared errors)
-        error = eps1**2 + eps2**2 + eps3**2
-        
-        return error
+        return Is2, Iph
     
-    def calculate_parameters(self, x: np.ndarray) -> Tuple[float, float]:
+    def objective_function(self, params: np.ndarray) -> float:
         """
-        Calculate Is and Iph for given parameters
+        Objective function for parameter optimization
+        Minimizes squared errors at key operating points
         
         Args:
-            x: Array of parameters [a, Rs, Rp]
+            params: [Is1, a1, a2, Rs, Rp]
             
         Returns:
-            Is: Saturation current
-            Iph: Photocurrent
+            Objective function value (sum of squared errors)
         """
-        a, Rs, Rp = x
-        
-        exp_voc = np.exp(Q * self.Voc / (a * K * self.Nc * self.T))
-        exp_rs_isc = np.exp(Q * Rs * self.Isc / (a * K * self.Nc * self.T))
-        
-        Is = (self.Isc + Rs * self.Isc / Rp - self.Voc / Rp) / (exp_voc - exp_rs_isc)
-        Iph = Is * (exp_voc - 1) + self.Voc / Rp
-        
-        return Is, Iph
+        try:
+            Is1, a1, a2, Rs, Rp = params
+            
+            # Check for valid parameter values
+            if (Is1 <= 0 or a1 <= 0 or a2 <= 0 or Rs <= 0 or Rp <= 0):
+                return 1e10
+            
+            # Calculate derived parameters
+            Is2, Iph = self.calculate_derived_parameters(params)
+            
+            # Error at open circuit (V = Voc, I = 0)
+            eps1 = (Is1 * (np.exp(self.q * self.Voc / (a1 * self.k * self.Nc * self.T)) - 1) + 
+                   Is2 * (np.exp(self.q * self.Voc / (a2 * self.k * self.Nc * self.T)) - 1) + 
+                   self.Voc / Rp - Iph)
+            
+            # Error at short circuit (V = 0, I = Isc)
+            eps2 = (self.Isc + Is1 * (np.exp(self.q * Rs * self.Isc / (a1 * self.k * self.Nc * self.T)) - 1) + 
+                   Is2 * (np.exp(self.q * Rs * self.Isc / (a2 * self.k * self.Nc * self.T)) - 1) + 
+                   Rs * self.Isc / Rp - Iph)
+            
+            # Error at maximum power point (V = Vm, I = Im)
+            eps3 = (Iph - Is1 * (np.exp(self.q * (self.Vm + Rs * self.Im) / (a1 * self.k * self.Nc * self.T)) - 1) - 
+                   Is2 * (np.exp(self.q * (self.Vm + Rs * self.Im) / (a2 * self.k * self.Nc * self.T)) - 1) - 
+                   (self.Vm + Rs * self.Im) / Rp - self.Im)
+            
+            # Sum of squared errors
+            objective = eps1**2 + eps2**2 + eps3**2
+            
+            return objective
+            
+        except (OverflowError, ZeroDivisionError, ValueError):
+            return 1e10
     
-    def calculate_iv_curve(self, x: np.ndarray, num_points: int = 100) -> Tuple[np.ndarray, np.ndarray]:
+    def calculate_current(self, voltage: float, params: np.ndarray) -> float:
         """
-        Calculate I-V curve for given parameters
+        Calculate current for given voltage using double-diode model
+        Solves: I = Iph - Is1*(exp(q*(V+I*Rs)/(a1*k*T*Nc)) - 1) 
+                   - Is2*(exp(q*(V+I*Rs)/(a2*k*T*Nc)) - 1) - (V+I*Rs)/Rp
         
         Args:
-            x: Array of parameters [a, Rs, Rp]
+            voltage: Terminal voltage
+            params: [Is1, a1, a2, Rs, Rp]
+            
+        Returns:
+            Current value
+        """
+        Is1, a1, a2, Rs, Rp = params
+        Is2, Iph = self.calculate_derived_parameters(params)
+        
+        def current_equation(I):
+            """Implicit equation to solve for current"""
+            term1 = Is1 * (np.exp(self.q * (voltage + I * Rs) / (a1 * self.k * self.Nc * self.T)) - 1)
+            term2 = Is2 * (np.exp(self.q * (voltage + I * Rs) / (a2 * self.k * self.Nc * self.T)) - 1)
+            term3 = (voltage + I * Rs) / Rp
+            return Iph - term1 - term2 - term3 - I
+        
+        try:
+            # Initial guess for current
+            I_guess = max(0, self.Isc * (1 - voltage / self.Voc))
+            current = fsolve(current_equation, I_guess, xtol=1e-10)[0]
+            return max(0, current)  # Current should be non-negative
+        except:
+            return 0
+    
+    def generate_iv_curve(self, params: np.ndarray, 
+                         num_points: int = 100) -> Tuple[np.ndarray, np.ndarray]:
+        """
+        Generate I-V characteristic curve
+        
+        Args:
+            params: [Is1, a1, a2, Rs, Rp]
             num_points: Number of points in the curve
             
         Returns:
-            V: Voltage array
-            I: Current array
+            Tuple of (voltage_array, current_array)
         """
-        a, Rs, Rp = x
-        Is, Iph = self.calculate_parameters(x)
+        voltages = np.linspace(0, self.Voc * 1.1, num_points)
+        currents = np.array([self.calculate_current(v, params) for v in voltages])
         
-        # Generate voltage points
-        V = np.linspace(0, self.Voc, num_points)
-        I = np.zeros_like(V)
+        # Ensure monotonic decrease
+        for i in range(1, len(currents)):
+            if currents[i] > currents[i-1]:
+                currents[i] = currents[i-1]
         
-        # Define the implicit equation for current
-        def current_equation(i, v):
-            return Iph - Is * (np.exp(Q * (v + Rs * i) / (a * K * self.Nc * self.T)) - 1) - (v + Rs * i) / Rp - i
-        
-        # Solve for current at each voltage point
-        for idx, v in enumerate(V):
-            try:
-                I[idx] = fsolve(current_equation, self.Isc/2, args=(v,))[0]
-            except:
-                I[idx] = 0
-        
-        return V, I
+        return voltages, currents
     
-    def calculate_power_curve(self, x: np.ndarray, num_points: int = 100) -> Tuple[np.ndarray, np.ndarray]:
+    def generate_pv_curve(self, params: np.ndarray, 
+                         num_points: int = 100) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Calculate P-V curve for given parameters
+        Generate P-V characteristic curve
         
         Args:
-            x: Array of parameters [a, Rs, Rp]
+            params: [Is1, a1, a2, Rs, Rp]
             num_points: Number of points in the curve
             
         Returns:
-            V: Voltage array
-            P: Power array
+            Tuple of (voltage_array, power_array)
         """
-        V, I = self.calculate_iv_curve(x, num_points)
-        P = V * I
-        return V, P
+        voltages, currents = self.generate_iv_curve(params, num_points)
+        powers = voltages * currents
+        return voltages, powers
     
     def get_module_info(self) -> Dict:
-        """Get module information"""
+        """
+        Get module information and specifications
+        
+        Returns:
+            Dictionary with module details
+        """
         return {
-            'type': self.module_specs['name'],
-            'Voc': self.Voc,
-            'Isc': self.Isc,
-            'Vm': self.Vm,
-            'Im': self.Im,
-            'Pmax': self.Vm * self.Im,
-            'Nc': self.Nc,
-            'Temperature': self.temperature
+            'name': self.module_name,
+            'specifications': self.module_specs,
+            'temperature': self.temperature,
+            'model_type': 'Double-diode',
+            'parameters': ['Is1', 'a1', 'a2', 'Rs', 'Rp'],
+            'derived_parameters': ['Is2', 'Iph']
         }

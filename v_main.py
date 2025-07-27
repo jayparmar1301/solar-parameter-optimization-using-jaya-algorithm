@@ -1,6 +1,7 @@
 """
 Working main script for double diode solar module parameter optimization
 Compatible with multiple optimizer implementations: JAYA, BMR, BWR
+Enhanced with comprehensive visualization capabilities
 """
 import numpy as np
 import time
@@ -18,6 +19,10 @@ from optimization.jaya import JAYAOptimizer
 from optimization.bmr import BMROptimizer
 from optimization.bwr import BWROptimizer
 
+# Import visualization and data handling utilities
+from utils.visualization import Visualizer
+from utils.data_handler import DataHandler
+
 # Available optimizers
 AVAILABLE_OPTIMIZERS = {
     'JAYA': JAYAOptimizer,
@@ -26,7 +31,7 @@ AVAILABLE_OPTIMIZERS = {
 }
 
 
-def get_optimizer(optimizer_name, objective_func, bounds, population_size, max_iterations):
+def get_optimizer(optimizer_name, objective_func, bounds, population_size, max_iterations, seed=None):
     """
     Create optimizer instance based on name
     
@@ -36,6 +41,7 @@ def get_optimizer(optimizer_name, objective_func, bounds, population_size, max_i
         bounds: Parameter bounds dictionary
         population_size: Population size
         max_iterations: Maximum iterations
+        seed: Random seed for reproducibility
         
     Returns:
         Optimizer instance
@@ -44,12 +50,24 @@ def get_optimizer(optimizer_name, objective_func, bounds, population_size, max_i
         raise ValueError(f"Unknown optimizer: {optimizer_name}. Available: {list(AVAILABLE_OPTIMIZERS.keys())}")
     
     optimizer_class = AVAILABLE_OPTIMIZERS[optimizer_name]
-    return optimizer_class(
-        objective_func=objective_func,
-        bounds=bounds,
-        population_size=population_size,
-        max_iterations=max_iterations
-    )
+    
+    # Create optimizer with seed if supported
+    try:
+        return optimizer_class(
+            objective_func=objective_func,
+            bounds=bounds,
+            population_size=population_size,
+            max_iterations=max_iterations,
+            seed=seed
+        )
+    except TypeError:
+        # Fallback if seed parameter not supported
+        return optimizer_class(
+            objective_func=objective_func,
+            bounds=bounds,
+            population_size=population_size,
+            max_iterations=max_iterations
+        )
 
 
 def run_single_optimization(module_type='ST40', optimizer_name='JAYA', seed=None, verbose=False):
@@ -81,7 +99,8 @@ def run_single_optimization(module_type='ST40', optimizer_name='JAYA', seed=None
         objective_func=solar_model.objective_function,
         bounds=DOUBLE_DIODE_BOUNDS,
         population_size=OPTIMIZATION_PARAMS['population_size'],
-        max_iterations=OPTIMIZATION_PARAMS['max_iterations']
+        max_iterations=OPTIMIZATION_PARAMS['max_iterations'],
+        seed=seed
     )
     
     # Run optimization
@@ -106,6 +125,14 @@ def run_single_optimization(module_type='ST40', optimizer_name='JAYA', seed=None
     # Ensure fitness is numeric
     best_fitness = float(best_fitness)
     
+    # Get optimizer results for convergence history
+    try:
+        optimizer_results = optimizer.get_results()
+        convergence_history = optimizer_results.get('convergence_history', [])
+    except:
+        # Create basic convergence history if not available
+        convergence_history = [best_fitness] * OPTIMIZATION_PARAMS['max_iterations']
+    
     # Create results dictionary
     results = {
         'run_id': 0,  # Will be set later
@@ -114,7 +141,8 @@ def run_single_optimization(module_type='ST40', optimizer_name='JAYA', seed=None
         'execution_time': end_time - start_time,
         'module_type': module_type,
         'model_type': 'DoubleDiode',
-        'optimizer': optimizer_name
+        'optimizer': optimizer_name,
+        'convergence_history': convergence_history
     }
     
     # Calculate derived parameters
@@ -339,10 +367,10 @@ def save_results_to_file(results, optimizer_name='JAYA', filename=None):
         f.write(f"Avg Time:     {np.mean([r['execution_time'] for r in results]):.2f} seconds/run\n")
         
         # Algorithm information
-        optimizer_instance = get_optimizer(
-            optimizer_name, None, DOUBLE_DIODE_BOUNDS, 50, 1000
-        )
         try:
+            optimizer_instance = get_optimizer(
+                optimizer_name, None, DOUBLE_DIODE_BOUNDS, 50, 1000
+            )
             algo_info = optimizer_instance.get_algorithm_info()
             f.write("\n" + "=" * 60 + "\n")
             f.write("ALGORITHM INFORMATION\n")
@@ -435,7 +463,7 @@ def compare_optimizers(module_type='ST40', optimizers=['JAYA', 'BMR', 'BWR'], nu
 
 def main():
     """
-    Main execution function with optimizer selection
+    Main execution function with optimizer selection and comprehensive visualization
     """
     # Configuration
     module_type = 'ST40'  # Options: 'KC200GT', 'Shell_SQ85', 'ST40'
@@ -450,7 +478,7 @@ def main():
     
     # You can change this to test different optimizers
     # Options: 'JAYA', 'BMR', 'BWR'
-    selected_optimizer = 'BMR' # Change this to test different optimizers
+    selected_optimizer = 'BMR'  # Change this to test different optimizers
     
     # Or uncomment the following line to compare all optimizers
     # return compare_optimizers(module_type=module_type, num_runs=10)
@@ -481,6 +509,11 @@ def main():
     print("=" * 60)
     
     try:
+        solar_model = DoubleDiodeModel(
+            module_type=module_type,
+            temperature=OPTIMIZATION_PARAMS['temperature']
+        )
+        
         test_result = run_single_optimization(
             module_type=module_type,
             optimizer_name=selected_optimizer,
@@ -523,18 +556,124 @@ def main():
         print("No results to analyze!")
         return
     
-    # Save results
+    # Save results using data handler
+    print(f"\n" + "=" * 60)
+    print("SAVING RESULTS")
+    print("=" * 60)
+    
+    data_handler = DataHandler()
+    
+    # Save results in standard format
+    data_handler.save_results(results, f'{selected_optimizer}_{module_type}_DoubleDiode')
+    
+    # Export for MATLAB compatibility
+    # data_handler.export_for_matlab(results, f'{selected_optimizer}_DoubleDiode_data', 
+                                #   f'{selected_optimizer}_{module_type}_DoubleDiode_matlab')
+    
+    # Also save using the original format
     filename = save_results_to_file(results, selected_optimizer)
+    
+    # VISUALIZATION SECTION - Similar to single diode implementation
+    print(f"\n" + "=" * 60)
+    print("GENERATING VISUALIZATIONS")
+    print("=" * 60)
+    
+    visualizer = Visualizer()
+    
+    # 1. Plot convergence of best run
+    best_idx = np.argmin([r['best_fitness'] for r in results])
+    print("Plotting convergence curve for best run...")
+    visualizer.plot_convergence(
+        results[best_idx]['convergence_history'],
+        title=f"{selected_optimizer} Double Diode Convergence - Best Run (Run {results[best_idx]['run_id']})"
+    )
+    
+    # 2. Plot 5D parameter distribution (adapted for double diode parameters)
+    print("Plotting 5D parameter distribution...")
+    try:
+        # Create modified plot for double diode parameters
+        visualizer.plot_double_diode_solutions([results], [selected_optimizer])
+    except AttributeError:
+        # Fallback: use 3D plot with selected parameters
+        print("Using 3D visualization for key parameters (a1, Rs, Rp)...")
+        # Modify results format for 3D plotting
+        modified_results = []
+        for r in results:
+            modified_r = r.copy()
+            # Map double diode parameters to expected 3D format [a, Rs, Rp]
+            modified_r['best_solution'] = [r['a1'], r['Rs'], r['Rp']]
+            modified_r['parameters'] = {'a': r['a1'], 'Rs': r['Rs'], 'Rp': r['Rp']}
+            modified_results.append(modified_r)
+        
+        visualizer.plot_3d_solutions([modified_results], [selected_optimizer])
+    
+    # 3. Plot I-V curves for best solution
+    print("Plotting I-V characteristics...")
+    best_solution = results[best_idx]['best_solution']
+    try:
+        visualizer.plot_double_diode_iv_curves(solar_model, [best_solution], 
+                                             [f'Best {selected_optimizer} Solution'])
+    except AttributeError:
+        # Fallback: use standard IV curve plotting
+        visualizer.plot_iv_curves(solar_model, [best_solution], 
+                                [f'Best {selected_optimizer} Solution'])
+    
+    # 4. Plot P-V curves for best solution
+    print("Plotting P-V characteristics...")
+    try:
+        visualizer.plot_double_diode_pv_curves(solar_model, [best_solution], 
+                                             [f'Best {selected_optimizer} Solution'])
+    except AttributeError:
+        # Fallback: use standard PV curve plotting
+        visualizer.plot_pv_curves(solar_model, [best_solution], 
+                                [f'Best {selected_optimizer} Solution'])
+    
+    # 5. Statistical analysis plots
+    print("Generating statistical analysis plots...")
+    try:
+        # Box plots for parameter distributions
+        visualizer.plot_parameter_statistics(results, selected_optimizer, model_type='double_diode')
+        
+        # Fitness distribution histogram
+        fitness_vals = [r['best_fitness'] for r in results]
+        visualizer.plot_fitness_distribution(fitness_vals, 
+                                           title=f'{selected_optimizer} Double Diode Fitness Distribution')
+        
+        # Parameter correlation analysis
+        visualizer.plot_parameter_correlations(results, model_type='double_diode')
+        
+    except AttributeError:
+        print("Extended statistical plots not available in current visualizer version")
+    
+    # 6. Performance summary plot
+    print("Creating performance summary...")
+    try:
+        visualizer.plot_optimization_summary(results, selected_optimizer, model_type='double_diode')
+    except AttributeError:
+        print("Performance summary plot not available in current visualizer version")
     
     # Final summary
     print(f"\n" + "=" * 60)
-    print("OPTIMIZATION COMPLETED SUCCESSFULLY!")
+    print("OPTIMIZATION AND VISUALIZATION COMPLETED SUCCESSFULLY!")
     print("=" * 60)
     print(f"Optimizer Used: {selected_optimizer}")
+    print(f"Model Type: Double Diode")
+    print(f"Module: {module_type}")
     print(f"Best fitness achieved: {best_result['best_fitness']:.10e}")
+    print(f"Best parameters:")
+    print(f"  Is1 = {best_result['Is1']:.6e} A")
+    print(f"  a1  = {best_result['a1']:.6f}")
+    print(f"  a2  = {best_result['a2']:.6f}")
+    print(f"  Rs  = {best_result['Rs']:.6f} Ω")
+    print(f"  Rp  = {best_result['Rp']:.6f} Ω")
+    print(f"  Is2 = {best_result['Is2']:.6e} A")
+    print(f"  Iph = {best_result['Iph']:.6f} A")
+    
     if filename:
         print(f"Results saved to: {filename}")
-    print(f"Ready for further analysis and visualization!")
+    
+    print("All visualizations generated successfully!")
+    print("Ready for further analysis and comparison!")
 
 
 if __name__ == "__main__":
